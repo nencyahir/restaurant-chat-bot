@@ -25,7 +25,12 @@ COLLECTION_NAME = os.getenv("COLLECTION_NAME", "restaurants")
 
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
 
+# Which LLM writes the answers: "anthropic" (Claude) or "gemini".
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "anthropic").strip().lower()
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-opus-5-5")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
+# Tried in order when the main model is overloaded or retired.
+GEMINI_FALLBACK_MODELS = ["gemini-3.5-flash", "gemini-flash-lite-latest", "gemini-3.1-flash-lite"]
 
 # Chunking: review text is split into chunks of roughly this many characters.
 REVIEW_CHUNK_CHARS = 700

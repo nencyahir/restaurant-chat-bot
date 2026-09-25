@@ -17,3 +17,6 @@ chroma_db/
 .vscode/
 .idea/
 .DS_Store
+
+# Raw screen recordings (compressed copy lives in docs/)
+*.mkv

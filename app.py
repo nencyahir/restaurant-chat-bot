@@ -9,7 +9,7 @@ import pandas as pd
 import streamlit as st
 
 from restaurant_bot import config
-from restaurant_bot.llm import LLMError, fallback_answer, llm_available, stream_answer
+from restaurant_bot.llm import LLMError, api_key_env_name, fallback_answer, llm_available, stream_answer
 from restaurant_bot.query_parser import Filters
 from restaurant_bot.retriever import Retriever
 from restaurant_bot.vector_store import VectorStoreError
@@ -104,7 +104,7 @@ def main() -> None:
 
     overrides = sidebar_filters(retriever.vocab)
     if not llm_available():
-        st.sidebar.warning("No ANTHROPIC_API_KEY found: showing retrieved results without LLM summaries.")
+        st.sidebar.warning(f"No {api_key_env_name()} found: showing retrieved results without LLM summaries.")
 
     if "messages" not in st.session_state:
         st.session_state.messages = []
@@ -148,7 +148,8 @@ def main() -> None:
             try:
                 answer = st.write_stream(stream_answer(result))
             except LLMError as exc:
-                st.warning(f"{exc} Showing retrieved results instead.")
+                logging.warning("LLM failed: %s", exc)
+                st.caption("AI summary is unavailable right now, so here are the matching restaurants.")
                 answer = fallback_answer(result)
                 st.markdown(answer)
         else:

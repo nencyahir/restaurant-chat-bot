@@ -1,10 +1,14 @@
-"""Grounded answer generation with Claude, plus a no-LLM fallback."""
+"""Grounded answer generation with Claude or Gemini, plus a no-LLM fallback."""
 
 import logging
 import os
 from typing import Iterator, List
 
 import anthropic
+import httpx
+from google import genai
+from google.genai import errors as genai_errors
+from google.genai import types as genai_types
 
 from restaurant_bot import config
 from restaurant_bot.retriever import RetrievalResult, RetrievedRestaurant
@@ -32,7 +36,14 @@ class LLMError(Exception):
     """Raised when the LLM call fails in a way the user should see."""
 
 
+def api_key_env_name() -> str:
+    """Name of the env var holding the key for the configured provider (for user-facing messages)."""
+    return "GEMINI_API_KEY" if config.LLM_PROVIDER == "gemini" else "ANTHROPIC_API_KEY"
+
+
 def llm_available() -> bool:
+    if config.LLM_PROVIDER == "gemini":
+        return bool(os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"))
     return bool(os.getenv("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_AUTH_TOKEN"))
 
 
@@ -50,7 +61,16 @@ def build_user_message(result: RetrievalResult) -> str:
     return f"{format_context(result.restaurants)}\n\n{filter_note}Question: {result.query}"
 
 
-def stream_answer(result: RetrievalResult, client: anthropic.Anthropic = None) -> Iterator[str]:
+def stream_answer(result: RetrievalResult) -> Iterator[str]:
+    """Stream the configured provider's grounded answer as text chunks."""
+    if config.LLM_PROVIDER == "gemini":
+        return _stream_gemini(result)
+    if config.LLM_PROVIDER == "anthropic":
+        return _stream_claude(result)
+    raise LLMError(f"Unknown LLM_PROVIDER '{config.LLM_PROVIDER}'. Use 'anthropic' or 'gemini'.")
+
+
+def _stream_claude(result: RetrievalResult, client: anthropic.Anthropic = None) -> Iterator[str]:
     """Stream Claude's grounded answer as text chunks."""
     client = client or anthropic.Anthropic()
     try:
@@ -79,6 +99,56 @@ def stream_answer(result: RetrievalResult, client: anthropic.Anthropic = None) -
         raise LLMError(f"Anthropic API error ({exc.status_code}): {exc.message}") from exc
     except anthropic.APIConnectionError as exc:
         raise LLMError("Could not reach the Anthropic API. Check your internet connection.") from exc
+
+
+def _stream_gemini(result: RetrievalResult, client: genai.Client = None) -> Iterator[str]:
+    """Stream Gemini's answer, falling back to other models while one is busy or unavailable."""
+    client = client or genai.Client()  # reads GEMINI_API_KEY / GOOGLE_API_KEY
+    models = [config.GEMINI_MODEL] + [m for m in config.GEMINI_FALLBACK_MODELS if m != config.GEMINI_MODEL]
+    for i, model in enumerate(models):
+        started = False
+        try:
+            for text in _stream_gemini_model(client, model, result):
+                started = True
+                yield text
+            return
+        except LLMError as exc:
+            # Only switch models before any text was shown, and only for busy/unavailable models.
+            retryable = isinstance(exc.__cause__, genai_errors.APIError) and exc.__cause__.code in (404, 429, 500, 503)
+            if started or not retryable or i == len(models) - 1:
+                raise
+            logger.warning("Gemini model %s failed (%s); trying %s", model, exc, models[i + 1])
+
+
+def _stream_gemini_model(client: genai.Client, model: str, result: RetrievalResult) -> Iterator[str]:
+    try:
+        stream = client.models.generate_content_stream(
+            model=model,
+            contents=build_user_message(result),
+            config=genai_types.GenerateContentConfig(
+                system_instruction=SYSTEM_PROMPT,
+                max_output_tokens=4000,
+                automatic_function_calling=genai_types.AutomaticFunctionCallingConfig(disable=True),
+            ),
+        )
+        finish_reason = None
+        for chunk in stream:
+            if chunk.text:
+                yield chunk.text
+            if chunk.candidates and chunk.candidates[0].finish_reason:
+                finish_reason = chunk.candidates[0].finish_reason
+        if finish_reason == genai_types.FinishReason.MAX_TOKENS:
+            yield "\n\n_(Answer truncated.)_"
+        elif finish_reason not in (None, genai_types.FinishReason.STOP):
+            yield "\n\n_The model declined to answer this request._"
+    except genai_errors.APIError as exc:
+        if exc.code in (400, 401, 403) and "API key" in str(exc):
+            raise LLMError("Invalid Gemini API key. Check GEMINI_API_KEY in your .env file.") from exc
+        if exc.code == 429:
+            raise LLMError("Rate limited by the Gemini API. Please wait a moment and retry.") from exc
+        raise LLMError(f"Gemini API error ({exc.code}): {exc.message}") from exc
+    except httpx.TransportError as exc:
+        raise LLMError("Could not reach the Gemini API. Check your internet connection.") from exc
 
 
 def _fmt_cost(meta) -> str:

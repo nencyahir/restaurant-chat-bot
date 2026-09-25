@@ -57,11 +57,8 @@ class Retriever:
             if not self._owns_collection:
                 raise
             self.collection = vector_store.get_collection()
-            self._vocab_reload()
+            self.vocab = load_vocab()
             return self._retrieve(query, top_k, overrides)
-
-    def _vocab_reload(self) -> None:
-        self.vocab = load_vocab()
 
     def _retrieve(self, query: str, top_k: int, overrides: Optional[Filters]) -> RetrievalResult:
         parsed = parse_query(query, self.vocab.get("cuisines", []), self.vocab.get("locations", []))
